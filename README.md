@@ -1,6 +1,6 @@
 # Daydream Everywhere
 
-**Run Google Daydream VR on Pixel 8 (Android 16) — and likely other modern Android devices.**
+**Run Google Daydream VR on Modern Android Devices**
 
 Google Daydream was officially discontinued, but with a few patches it still works perfectly on a Pixel 8 running Android 16. This LSPosed module + native binary patches fix all the compatibility breaks introduced by Android updates.
 
@@ -8,40 +8,39 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 
 ## What works
 
-| Feature | Status |
-|---|---|
-| 3D VR rendering (no flicker) | ✅ |
-| Any headset (Cardboard, Strax, QR-code viewers) | ✅ |
-| Daydream View headset | ✅ |
-| Controller (Daydream View remote) | ✅ |
-| Controller emulator (`com.google.vr.inputcompanion`) | ✅ |
-| YouTube VR | ✅ |
-| Expeditions | ❌ (app is dead) |
-| Daydream store ("Play Store") | ⚠️ Launches, server-side content unavailable (Google shut down the API) |
+- The Daydream app
+- YouTube VR
 
----
+## What doesn't work
+
+- Server sided stuff
 
 ## Requirements
 
-- Android device with **Magisk** root
+- A Rooted Android device that have **Magisk** or **Kernel SU**
 - **LSPosed** (Vector fork recommended)
-- A Daydream-capable device (Pixel 8 confirmed; others may work)
-- A headset: Daydream View, any Cardboard-compatible viewer, or a QR-code custom viewer
-- A controller: Daydream View remote, **or** a second phone running `com.google.vr.inputcompanion` (controller emulator APK)
+- A headset: Daydream or Cardboard
+- A controller: Daydream View remote, or a second phone running the [controller emulator](https://github.com/googlevr/gvr-android-sdk/blob/master/apks/controller_emulator.apk?raw=true)  (you may need to use "Install With Options" as this app has a low target SDK)
+- This module that spoofs the Daydream compatibility https://xdaforums.com/attachments/daydreamvr-zip.4875409/
+- These APK: [Daydream](https://www.apkmirror.com/apk/google-inc/daydream-daydream/daydream-daydream-1-23-190812026-release/daydream-1-23-190812026-android-apk-download/), [Vr Services](https://www.apkmirror.com/apk/google-inc/google-vr-services/google-vr-services-1-23-265693388-release/google-vr-services-1-23-265693388-2-android-apk-download/) and [Daydream keyboard](https://www.apkmirror.com/apk/google-inc/daydream-keyboard-daydream/daydream-keyboard-daydream-1-23-190812016-release/daydream-keyboard-1-23-190812016-android-apk-download/)
 
 ---
+
+## Disclaimer
+- This revival project uses vibe coded parts by Claude Ai
+- Note that i have tested it on my own device.
 
 ## Installation
 
 ### 1. LSPosed module (DaydreamFix)
 
-1. Download `daydreamfix.apk` from the [latest release](../../releases/latest)
+1. Download `daydreamEverywhere.apk` from the [latest release](../../releases/latest)
 2. Install it: `adb install daydreamfix.apk`
-3. In LSPosed Manager → Modules → enable **DaydreamFix** for:
+3. In LSPosed Manager → Modules → enable **DaydreamEverywhere** for:
    - `com.google.android.vr.home`
    - `com.google.vr.vrcore`
    - `com.google.android.apps.youtube.vr` (if you use YouTube VR)
-4. Force-stop the target apps — **no reboot needed**
+4. Force-stop the target apps
 
 ### 2. Native binary patches (Magisk module)
 
@@ -59,7 +58,7 @@ Android updates changed how shared memory is allocated. The `ashmem` calls in `l
 ### Controller not connecting
 `vr.home` calls two compiled-in GVR functions — `gvr_controller_state_get_connection_state` and `gvr_controller_state_get_api_status` — on every frame to decide whether to show "unable to access your remote". Without the original VR hardware these always return error/disconnected. Both functions are patched in `libvrhome_vrapps_native_lib.so` to always return success.
 
-### Headset rejected ("visionneuse Cardboard non compatible")
+### Headset rejected
 `DaydreamUtils.isDaydreamViewer()` checks for a `daydream_internal` proto field that only Daydream View headsets have. Hooked via LSPosed to always return `true` for any non-null `DeviceParams`.
 
 ### Android 16 Binder IPC crash
@@ -95,4 +94,5 @@ PRs welcome — especially:
 ## Credits
 
 Reverse engineering, patches, and module by **patapon888**.  
-Built with [LSPosed](https://github.com/LSPosed/LSPosed) / [XposedBridge](https://github.com/rovo89/XposedBridge).
+Contributers:
+- No one, Be the first!
