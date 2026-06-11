@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.daydreamfix">
+
+    <application
+        android:label="DaydreamFix"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <!-- Marks this APK as an Xposed/LSPosed module -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Fixes Daydream VR crash on Android 16 (BadParcelableException + ThermalInfoCache)" />
+
+        <!-- Minimum Xposed API version (53 = Android 5+, sufficient for LSPosed/Vector) -->
+        <meta-data
+            android:name="xposedminversion"
+            android:value="53" />
+
+        <!--
+            Scope hint for LSPosed/Vector UI — tells the module manager
+            which packages this module targets (purely informational).
+        -->
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.google.android.vr.home,com.google.vr.vrcore" />
+
+    </application>
+
+</manifest>
