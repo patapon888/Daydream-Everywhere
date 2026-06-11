@@ -1,5 +1,6 @@
 package io.github.daydreamfix;
 
+import android.accounts.Account;
 import android.app.Activity;
 import android.content.ComponentName;
 import android.content.ContentValues;
@@ -8,6 +9,15 @@ import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.BadParcelableException;
 import android.os.IBinder;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.lang.reflect.Method;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import android.os.Parcel;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -45,6 +55,7 @@ public class MainHook implements IXposedHookLoadPackage {
             hookNativeCallbacks(lpparam.classLoader);     // Hook 6 + D
             hookSurfaceViewType();
             hookControllerServiceBridge(lpparam.classLoader); // Hook CSB (PKG_DAYDREAM classloader)
+            hookStoreRequest(lpparam.classLoader);        // Hook PS: private store
         }
 
         if (lpparam.packageName.equals(PKG_YOUTUBE_VR)) {
@@ -706,6 +717,103 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Hook VPTR error: " + t);
         }
+    }
+
+    // ── Hook PS: Private store — intercept gRPC call, return JSON-sourced response ─
+    // amu.a(Account, dvq, ada) is the store fetch entry point. We skip the dead
+    // Google gRPC endpoint entirely and construct dvw→dwa→egv[]→egu[]→egr objects
+    // from store.json fetched from STORE_JSON_URL. The success callback ada.a(dvw)
+    // then follows the normal 200 path in biw.
+    private static final String STORE_JSON_URL =
+            "https://raw.githubusercontent.com/patapon888/Daydream-Everywhere/main/store.json";
+
+    private void hookStoreRequest(ClassLoader cl) {
+        try {
+            Class<?> amuClass  = XposedHelpers.findClass("defpackage.amu",  cl);
+            Class<?> dvqClass  = XposedHelpers.findClass("defpackage.dvq",  cl);
+            Class<?> adaClass  = XposedHelpers.findClass("defpackage.ada",  cl);
+
+            XposedHelpers.findAndHookMethod(amuClass, "a",
+                    Account.class, dvqClass, adaClass,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            p.setResult(null); // skip real gRPC call
+                            final Object ada = p.args[2];
+                            new Thread(() -> {
+                                try {
+                                    Object dvw = buildStoreResponse(cl);
+                                    Method cb = null;
+                                    for (Method m : ada.getClass().getMethods()) {
+                                        if (m.getName().equals("a") && m.getParameterCount() == 1
+                                                && m.getParameterTypes()[0] == Object.class) {
+                                            cb = m; break;
+                                        }
+                                    }
+                                    if (cb == null) {
+                                        // ada is an interface — find via declared methods on biw
+                                        cb = ada.getClass().getDeclaredMethod("a", Object.class);
+                                    }
+                                    cb.setAccessible(true);
+                                    cb.invoke(ada, dvw);
+                                    XposedBridge.log(TAG + ": Hook PS: store response delivered");
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + ": Hook PS: error: " + t);
+                                }
+                            }, "DaydreamStore").start();
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook PS installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook PS FAILED: " + e); }
+    }
+
+    private Object buildStoreResponse(ClassLoader cl) throws Exception {
+        // Fetch JSON
+        HttpURLConnection conn = (HttpURLConnection) new URL(STORE_JSON_URL).openConnection();
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
+            String line; while ((line = r.readLine()) != null) sb.append(line);
+        }
+        JSONObject json = new JSONObject(sb.toString());
+        JSONArray collections = json.getJSONArray("collections");
+
+        // Build egv[] (one per collection)
+        Class<?> egvClass = XposedHelpers.findClass("defpackage.egv", cl);
+        Class<?> eguClass = XposedHelpers.findClass("defpackage.egu", cl);
+        Class<?> egrClass = XposedHelpers.findClass("defpackage.egr", cl);
+        Class<?> dwaClass = XposedHelpers.findClass("defpackage.dwa", cl);
+        Class<?> dvwClass = XposedHelpers.findClass("defpackage.dvw", cl);
+
+        Object[] egvArr = (Object[]) java.lang.reflect.Array.newInstance(egvClass, collections.length());
+        for (int i = 0; i < collections.length(); i++) {
+            JSONObject col = collections.getJSONObject(i);
+            JSONArray apps = col.getJSONArray("apps");
+
+            Object[] eguArr = (Object[]) java.lang.reflect.Array.newInstance(eguClass, apps.length());
+            for (int j = 0; j < apps.length(); j++) {
+                JSONObject app = apps.getJSONObject(j);
+                Object egr = egrClass.newInstance();
+                XposedHelpers.setObjectField(egr, "b", app.getString("package"));
+                XposedHelpers.setObjectField(egr, "c", app.getString("title"));
+                Object egu = eguClass.newInstance();
+                XposedHelpers.setObjectField(egu, "b", egr);
+                eguArr[j] = egu;
+            }
+
+            Object egv = egvClass.newInstance();
+            XposedHelpers.setObjectField(egv, "a", col.getString("id"));
+            XposedHelpers.setObjectField(egv, "b", col.getString("title"));
+            XposedHelpers.setObjectField(egv, "d", eguArr);
+            egvArr[i] = egv;
+        }
+
+        Object dwa = dwaClass.newInstance();
+        XposedHelpers.setObjectField(dwa, "a", egvArr);
+
+        Object dvw = dvwClass.newInstance();
+        XposedHelpers.setObjectField(dvw, "e", dwa);
+        return dvw;
     }
 
     // ── Hook H: Accept any headset as Daydream-compatible ───────────────────

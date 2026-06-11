@@ -1,0 +1,14 @@
+{
+  "collections": [
+    {
+      "id": "working_apps",
+      "title": "Apps",
+      "apps": [
+        {
+          "package": "com.google.android.apps.youtube.vr",
+          "title": "YouTube VR"
+        }
+      ]
+    }
+  ]
+}
