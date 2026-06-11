@@ -1,6 +1,6 @@
 # Daydream Everywhere
 
-**Run Google Daydream VR on Modern Android Devices**
+**Run Google Daydream on Modern Android Devices**
 
 Google Daydream was officially discontinued, but with a few patches it still works perfectly on a Pixel 8 running Android 16. This LSPosed module + native binary patches fix all the compatibility breaks introduced by Android updates.
 
@@ -34,8 +34,7 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 
 ### 1. LSPosed module (DaydreamFix)
 
-1. Download `daydreamEverywhere.apk` from the [latest release](../../releases/latest)
-2. Install it: `adb install daydreamfix.apk`
+1. Download and install `daydreamEverywhere.apk` from the [latest release](../../releases/latest)
 3. In LSPosed Manager → Modules → enable **DaydreamEverywhere** for:
    - `com.google.android.vr.home`
    - `com.google.vr.vrcore`
@@ -44,9 +43,8 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 
 ### 2. Native binary patches (Magisk module)
 
-The patched `.so` files fix rendering and controller compatibility at the native layer.
-
-> **Pre-built Magisk module coming in a future release.** For now, see the [patches documentation](PATCHES.md) to apply them manually with the included scripts.
+- The patched `.so` files fix rendering and controller compatibility at the native layer.
+- Download the .zip from the [latest release](../../releases/latest) and install it in Magisk or Kerenl SU
 
 ---
 
@@ -93,6 +91,6 @@ PRs welcome — especially:
 
 ## Credits
 
-Reverse engineering, patches, and module by **patapon888**.  
+Reverse engineering, patches, and module by **Patapon888**.  
 Contributers:
 - No one, Be the first!
