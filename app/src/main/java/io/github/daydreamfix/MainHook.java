@@ -25,7 +25,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class MainHook implements IXposedHookLoadPackage {
 
-    private static final String TAG = "DaydreamFix";
+    private static final String TAG = "DaydreamEverywhere";
     private static final String PKG_DAYDREAM   = "com.google.android.vr.home";
     private static final String PKG_VRCORE     = "com.google.vr.vrcore";
     private static final String PKG_YOUTUBE_VR = "com.google.android.apps.youtube.vr";
