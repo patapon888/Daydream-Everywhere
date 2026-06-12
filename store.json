@@ -7,11 +7,11 @@
         {
           "package": "com.google.android.apps.youtube.vr",
           "title": "YouTube VR",
-          "motion": 2
+          "motion": 1
         },
         {
-          "package": "org.mozilla.vrbrowser",
-          "title": "Firefox Reality",
+          "package": "in.fulldive.shell",
+          "title": "Fulldive VR",
           "motion": 2
         },
         {
