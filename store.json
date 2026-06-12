@@ -6,7 +6,18 @@
       "apps": [
         {
           "package": "com.google.android.apps.youtube.vr",
-          "title": "YouTube VR"
+          "title": "YouTube VR",
+          "motion": 2
+        },
+        {
+          "package": "org.mozilla.vrbrowser",
+          "title": "Firefox Reality",
+          "motion": 2
+        },
+        {
+          "package": "com.google.android.apps.photos.daydream",
+          "title": "Google Photos VR",
+          "motion": 1
         }
       ]
     }

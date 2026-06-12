@@ -36,9 +36,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "DaydreamEverywhere";
-    private static final String PKG_DAYDREAM   = "com.google.android.vr.home";
-    private static final String PKG_VRCORE     = "com.google.vr.vrcore";
-    private static final String PKG_YOUTUBE_VR = "com.google.android.apps.youtube.vr";
+    private static final String PKG_DAYDREAM       = "com.google.android.vr.home";
+    private static final String PKG_VRCORE         = "com.google.vr.vrcore";
+    private static final String PKG_YOUTUBE_VR     = "com.google.android.apps.youtube.vr";
+    private static final String PKG_FIREFOX_REALITY = "org.mozilla.vrbrowser";
 
     // Strong reference to the NativeCallbacks instance captured at onServiceConnected.
     private static volatile Object sNativeCallbacks = null;
@@ -53,16 +54,24 @@ public class MainHook implements IXposedHookLoadPackage {
             hookVrLauncherOrientation();
             hookBlastBufferQueue(lpparam.classLoader);
             hookNativeCallbacks(lpparam.classLoader);     // Hook 6 + D
-            hookSurfaceViewType();
+            hookSurfaceViewType(PKG_DAYDREAM);
             hookControllerServiceBridge(lpparam.classLoader); // Hook CSB (PKG_DAYDREAM classloader)
             hookStoreRequest(lpparam.classLoader);        // Hook PS: private store
+            hookAppTile(lpparam.classLoader);             // Hook Tile: force placeholder icons
         }
 
         if (lpparam.packageName.equals(PKG_YOUTUBE_VR)) {
             XposedBridge.log(TAG + ": Injecting into " + PKG_YOUTUBE_VR);
             hookParcelReadException();
             hookBlastBufferQueue(lpparam.classLoader);
-            hookSurfaceViewType();
+            hookSurfaceViewType(PKG_YOUTUBE_VR);
+        }
+
+        if (lpparam.packageName.equals(PKG_FIREFOX_REALITY)) {
+            XposedBridge.log(TAG + ": Injecting into " + PKG_FIREFOX_REALITY);
+            hookParcelReadException();
+            hookBlastBufferQueue(lpparam.classLoader);
+            hookSurfaceViewType(PKG_FIREFOX_REALITY);
         }
 
         if (lpparam.packageName.equals(PKG_VRCORE)) {
@@ -142,14 +151,14 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     // ── Hook 3b: SurfaceView PUSH_BUFFERS ────────────────────────────────────
-    private void hookSurfaceViewType() {
+    private void hookSurfaceViewType(String pkgName) {
         try {
             XposedHelpers.findAndHookMethod(SurfaceView.class, "onAttachedToWindow",
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
                             SurfaceView sv = (SurfaceView) p.thisObject;
                             Context ctx = sv.getContext();
-                            if (ctx == null || !PKG_DAYDREAM.equals(ctx.getPackageName())) return;
+                            if (ctx == null || !pkgName.equals(ctx.getPackageName())) return;
                             sv.getHolder().setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
                             XposedBridge.log(TAG + ": Hook 3b: Set PUSH_BUFFERS on VR SurfaceView");
                         }
@@ -719,6 +728,79 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    // ── Hook Tile: force placeholder icons + fix text visibility ────────────
+    // Only applies to our fake store tiles (bkh.n == null, i.e. no real FIFE icon URL).
+    // Discovery tab tiles have n/o already set to real FIFE URLs by bhd.a() before we
+    // fire — we must leave those alone, otherwise bkh.d() would overwrite their async
+    // texture loads with placeholder paths and break discovery rendering.
+    //
+    // Text visibility: the Lullaby blueprint has white title text (designed for dark icon
+    // backgrounds). Without real icons the info area has no background, so white text
+    // lands on either the white discovery panel or the dark cave — invisible in both cases.
+    // Fix: dark semi-transparent overlay on bkh.i + confirm title (bkh.j) is white.
+    private void hookAppTile(ClassLoader cl) {
+        try {
+            Class<?> bhdClass = XposedHelpers.findClass("bhd", cl);
+            Class<?> eguClass = XposedHelpers.findClass("egu", cl);
+
+            // Mathfu.Vec4 may be compiled as a static nested class by proguard (no outer ref).
+            // Try the static-style 4-float constructor first; fall back to non-static (outer+4).
+            final Class<?> mathfuClass = XposedHelpers.findClass(
+                    "com.google.vr.internal.lullaby.Mathfu", cl);
+            final Class<?> vec4Class = XposedHelpers.findClass(
+                    "com.google.vr.internal.lullaby.Mathfu$Vec4", cl);
+            java.lang.reflect.Constructor<?> ctor;
+            Object mathfuInst = null;
+            try {
+                ctor = vec4Class.getDeclaredConstructor(
+                        float.class, float.class, float.class, float.class);
+            } catch (NoSuchMethodException ignored) {
+                ctor = vec4Class.getDeclaredConstructor(
+                        mathfuClass, float.class, float.class, float.class, float.class);
+                mathfuInst = mathfuClass.newInstance();
+            }
+            ctor.setAccessible(true);
+            final java.lang.reflect.Constructor<?> vec4Ctor = ctor;
+            final Object outerInst = mathfuInst;
+
+            XposedHelpers.findAndHookMethod(bhdClass, "a",
+                    eguClass, int.class, int.class, int.class,
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                            Object tile = p.getResult();
+                            if (tile == null) return;
+                            // Only touch tiles where bkh.n is null — those are our fake store
+                            // tiles with no real icon URL. Discovery tiles have n already set.
+                            if (XposedHelpers.getObjectField(tile, "n") != null) return;
+                            try {
+                                // Force n/o non-null so bkh.d() loads the placeholder textures.
+                                XposedHelpers.setObjectField(tile, "n", "textures/app_icon_foreground_placeholder.webp");
+                                XposedHelpers.setObjectField(tile, "o", "textures/app_icon_background_placeholder.webp");
+                                tile.getClass().getMethod("d").invoke(tile);
+
+                                // Build Vec4 for colors (r,g,b,a).
+                                Object darkBg = outerInst != null
+                                        ? vec4Ctor.newInstance(outerInst, 0.1f, 0.1f, 0.1f, 0.85f)
+                                        : vec4Ctor.newInstance(0.1f, 0.1f, 0.1f, 0.85f);
+                                Object white = outerInst != null
+                                        ? vec4Ctor.newInstance(outerInst, 1.0f, 1.0f, 1.0f, 1.0f)
+                                        : vec4Ctor.newInstance(1.0f, 1.0f, 1.0f, 1.0f);
+
+                                // Dark overlay on info-area background (bkh.i) for contrast.
+                                XposedHelpers.callMethod(
+                                        XposedHelpers.getObjectField(tile, "i"), "a", darkBg);
+                                // White title text (bkh.j).
+                                XposedHelpers.callMethod(
+                                        XposedHelpers.getObjectField(tile, "j"), "a", white);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + ": Hook Tile: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook Tile installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook Tile FAILED: " + e); }
+    }
+
     // ── Hook PS: Private store — intercept gRPC call, return JSON-sourced response ─
     // amu.a(Account, dvq, ada) is the store fetch entry point. We skip the dead
     // Google gRPC endpoint entirely and construct dvw→dwa→egv[]→egu[]→egr objects
@@ -729,14 +811,22 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private void hookStoreRequest(ClassLoader cl) {
         try {
-            Class<?> amuClass  = XposedHelpers.findClass("defpackage.amu",  cl);
-            Class<?> dvqClass  = XposedHelpers.findClass("defpackage.dvq",  cl);
-            Class<?> adaClass  = XposedHelpers.findClass("defpackage.ada",  cl);
+            Class<?> amuClass  = XposedHelpers.findClass("amu",  cl);
+            Class<?> dvqClass  = XposedHelpers.findClass("dvq",  cl);
+            Class<?> adaClass  = XposedHelpers.findClass("ada",  cl);
 
             XposedHelpers.findAndHookMethod(amuClass, "a",
                     Account.class, dvqClass, adaClass,
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            // Intercept store GetCollection calls for both the VR play store
+                            // (biw → bit.c() renders the Lullaby tile row) and the 2D discovery
+                            // tab (ahd → agv.a() renders the RecyclerView list). Both use amu.a()
+                            // with the same dvw response format; all other callbacks pass through.
+                            String cbName = p.args[2].getClass().getSimpleName();
+                            if (!"biw".equals(cbName) && !"ahd".equals(cbName)) {
+                                return;
+                            }
                             p.setResult(null); // skip real gRPC call
                             final Object ada = p.args[2];
                             new Thread(() -> {
@@ -779,11 +869,12 @@ public class MainHook implements IXposedHookLoadPackage {
         JSONArray collections = json.getJSONArray("collections");
 
         // Build egv[] (one per collection)
-        Class<?> egvClass = XposedHelpers.findClass("defpackage.egv", cl);
-        Class<?> eguClass = XposedHelpers.findClass("defpackage.egu", cl);
-        Class<?> egrClass = XposedHelpers.findClass("defpackage.egr", cl);
-        Class<?> dwaClass = XposedHelpers.findClass("defpackage.dwa", cl);
-        Class<?> dvwClass = XposedHelpers.findClass("defpackage.dvw", cl);
+        Class<?> egvClass = XposedHelpers.findClass("egv", cl);
+        Class<?> eguClass = XposedHelpers.findClass("egu", cl);
+        Class<?> egrClass = XposedHelpers.findClass("egr", cl);
+        Class<?> egwClass = XposedHelpers.findClass("egw", cl);
+        Class<?> dwaClass = XposedHelpers.findClass("dwa", cl);
+        Class<?> dvwClass = XposedHelpers.findClass("dvw", cl);
 
         Object[] egvArr = (Object[]) java.lang.reflect.Array.newInstance(egvClass, collections.length());
         for (int i = 0; i < collections.length(); i++) {
@@ -793,9 +884,23 @@ public class MainHook implements IXposedHookLoadPackage {
             Object[] eguArr = (Object[]) java.lang.reflect.Array.newInstance(eguClass, apps.length());
             for (int j = 0; j < apps.length(); j++) {
                 JSONObject app = apps.getJSONObject(j);
+                String pkg = app.getString("package");
+                String title = app.getString("title");
+
                 Object egr = egrClass.newInstance();
-                XposedHelpers.setObjectField(egr, "b", app.getString("package"));
-                XposedHelpers.setObjectField(egr, "c", app.getString("title"));
+                XposedHelpers.setObjectField(egr, "b", pkg);   // identifier (used in log messages)
+                XposedHelpers.setObjectField(egr, "c", title); // display title (bkhVar.j.b(egr.c))
+                XposedHelpers.setObjectField(egr, "k", pkg);   // package_name for launch event (vr::launcher::SetEntityPackageEvent)
+
+                // egr.q (DaydreamInfo egw) must be non-null for bhw.a(egr) to return true,
+                // which is required for the click handler (bhg) to trigger the launch flow.
+                // egw.d is the motion type Integer (proto number): 1=NO_MOTION, 2=MODERATE, 3=INTENSE.
+                // Default (0) maps to UNKNOWN_MOTION → "Mouvement inconnu" in detail page header.
+                int motionType = app.optInt("motion", 2);
+                Object egw = egwClass.newInstance();
+                XposedHelpers.setObjectField(egw, "d", Integer.valueOf(motionType));
+                XposedHelpers.setObjectField(egr, "q", egw);
+
                 Object egu = eguClass.newInstance();
                 XposedHelpers.setObjectField(egu, "b", egr);
                 eguArr[j] = egu;
