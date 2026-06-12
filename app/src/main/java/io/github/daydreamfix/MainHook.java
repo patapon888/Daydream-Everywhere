@@ -60,6 +60,7 @@ public class MainHook implements IXposedHookLoadPackage {
             hookStoreRequest(lpparam.classLoader);        // Hook PS: private store
             hookAppTile(lpparam.classLoader);             // Hook Tile: force placeholder icons
             hookDiscoveryClick(lpparam.classLoader);      // Hook DC: launch apps from discovery
+            hookVrSessionQuery();                         // Hook VrQ: always return is_in_vr_session=true
         }
 
         if (lpparam.packageName.equals(PKG_YOUTUBE_VR)) {
@@ -73,14 +74,16 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": Injecting into " + PKG_FIREFOX_REALITY);
             hookParcelReadException();
             hookBlastBufferQueue(lpparam.classLoader);
-            hookSurfaceViewType(PKG_FIREFOX_REALITY);
+            // hookSurfaceViewType intentionally omitted: Firefox Reality uses GeckoView
+            // SurfaceViews for web content; PUSH_BUFFERS on those causes crash.
         }
 
         if (lpparam.packageName.equals(PKG_PHOTOS_VR)) {
             XposedBridge.log(TAG + ": Injecting into " + PKG_PHOTOS_VR);
             hookParcelReadException();
             hookBlastBufferQueue(lpparam.classLoader);
-            hookSurfaceViewType(PKG_PHOTOS_VR);
+            // hookSurfaceViewType intentionally omitted: same reason as Firefox Reality.
+            hookDaydreamApi(lpparam.classLoader);         // force Daydream mode (not Cardboard fallback)
         }
 
         if (lpparam.packageName.equals(PKG_VRCORE)) {
@@ -180,17 +183,19 @@ public class MainHook implements IXposedHookLoadPackage {
     private void hookVrLauncherOrientation() {
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
                     Activity a = (Activity) p.thisObject;
-                    // Set is_in_vr_session=true for any vr.home Activity so the library tab
-                    // works without needing to enter VR mode first.
+                    // beforeHook fires before fragment dispatching — ensures is_in_vr_session=true
+                    // is already written before agv.onResume() calls amu.a().
+                    // hookVrSessionQuery intercepts the read side too (belt-and-suspenders).
                     try {
                         ContentValues cv = new ContentValues();
                         cv.put("name", "is_in_vr_session"); cv.put("value", "true");
-                        a.getContentResolver().insert(
+                        Uri res = a.getContentResolver().insert(
                                 Uri.parse("content://com.google.vr.vrcore.settings/boolean_settings"), cv);
-                        XposedBridge.log(TAG + ": Hook 8: is_in_vr_session=true (" + a.getClass().getSimpleName() + ")");
-                    } catch (Throwable t) { XposedBridge.log(TAG + ": Hook 8 set-true FAILED: " + t); }
+                        XposedBridge.log(TAG + ": Hook 8: is_in_vr_session=true res=" + res
+                                + " (" + a.getClass().getSimpleName() + ")");
+                    } catch (Throwable t) { XposedBridge.log(TAG + ": Hook 8 FAILED: " + t); }
                     // Landscape lock only for VR launcher
                     if (!a.getClass().getName().equals("com.google.vr.app.Launcher.Launcher")) return;
                     a.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
@@ -771,14 +776,20 @@ public class MainHook implements IXposedHookLoadPackage {
             final java.lang.reflect.Method finalColorMethod = colorMethod;
             XposedBridge.log(TAG + ": Hook Tile: eia.a(Vec4) = " + colorMethod);
 
-            // Vec4 constructor: getDeclaredConstructors()[0] handles both static (4 params)
-            // and non-static inner class (outer + 4 params) without guessing.
-            final java.lang.reflect.Constructor<?> vec4Ctor = vec4Class.getDeclaredConstructors()[0];
+            // Scan all Vec4 constructors: prefer 4-param (static inner class) over
+            // 5-param (non-static, first param = outer Mathfu instance).
+            java.lang.reflect.Constructor<?> _ctor4 = null, _ctor5 = null;
+            for (java.lang.reflect.Constructor<?> c : vec4Class.getDeclaredConstructors()) {
+                if (c.getParameterCount() == 4) _ctor4 = c;
+                else if (c.getParameterCount() == 5) _ctor5 = c;
+            }
+            final java.lang.reflect.Constructor<?> vec4Ctor = _ctor4 != null ? _ctor4 : _ctor5;
+            if (vec4Ctor == null) throw new RuntimeException("Hook Tile: no Vec4 ctor with 4 or 5 params");
             vec4Ctor.setAccessible(true);
-            final Object mathfuInst = vec4Ctor.getParameterCount() == 5
+            final Object mathfuInst = (vec4Ctor.getParameterCount() == 5)
                     ? mathfuClass.newInstance() : null;
             XposedBridge.log(TAG + ": Hook Tile: Vec4 ctor params=" + vec4Ctor.getParameterCount()
-                    + " mathfuInst=" + mathfuInst);
+                    + " mathfuInst=" + (mathfuInst != null));
 
             XposedHelpers.findAndHookMethod(bhdClass, "a",
                     eguClass, int.class, int.class, int.class,
@@ -803,8 +814,15 @@ public class MainHook implements IXposedHookLoadPackage {
                                 XposedHelpers.setObjectField(tile, "o",
                                         "textures/app_icon_background_placeholder.webp");
                                 tile.getClass().getMethod("d").invoke(tile);
+                                XposedBridge.log(TAG + ": Hook Tile: placeholder textures loaded");
 
-                                if (finalColorMethod != null) {
+                                Object entity_i = XposedHelpers.getObjectField(tile, "i");
+                                Object entity_j = XposedHelpers.getObjectField(tile, "j");
+                                XposedBridge.log(TAG + ": Hook Tile: entity_i=" + entity_i
+                                        + " entity_j=" + entity_j
+                                        + " colorMethod=" + finalColorMethod);
+
+                                if (finalColorMethod != null && entity_i != null && entity_j != null) {
                                     // darkBg: semi-transparent dark overlay so title is readable
                                     Object darkBg = mathfuInst != null
                                             ? vec4Ctor.newInstance(mathfuInst, 0.1f, 0.1f, 0.1f, 0.85f)
@@ -813,10 +831,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                     Object white = mathfuInst != null
                                             ? vec4Ctor.newInstance(mathfuInst, 1.0f, 1.0f, 1.0f, 1.0f)
                                             : vec4Ctor.newInstance(1.0f, 1.0f, 1.0f, 1.0f);
-                                    finalColorMethod.invoke(
-                                            XposedHelpers.getObjectField(tile, "i"), darkBg);
-                                    finalColorMethod.invoke(
-                                            XposedHelpers.getObjectField(tile, "j"), white);
+                                    XposedBridge.log(TAG + ": Hook Tile: darkBg=" + darkBg + " white=" + white);
+                                    finalColorMethod.invoke(entity_i, darkBg);
+                                    finalColorMethod.invoke(entity_j, white);
                                     XposedBridge.log(TAG + ": Hook Tile: colors applied");
                                 }
                             } catch (Throwable t) {
@@ -985,6 +1002,73 @@ public class MainHook implements IXposedHookLoadPackage {
             });
             XposedBridge.log(TAG + ": Hook DC installed");
         } catch (Throwable e) { XposedBridge.log(TAG + ": Hook DC FAILED: " + e); }
+    }
+
+    // ── Hook VrQ: Intercept is_in_vr_session ContentProvider read ───────────
+    // The library/discovery tabs query content://com.google.vr.vrcore.settings/boolean_settings
+    // for is_in_vr_session to decide whether to show content. On fresh startup vrcore may not
+    // have started yet, or the INSERT from Hook 8 may land after the query fires. Fix: intercept
+    // any ContentResolver.query on that URI in the vr.home process and always return true.
+    private void hookVrSessionQuery() {
+        XC_MethodHook interceptor = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                Uri uri = (Uri) p.args[0];
+                if (uri == null) return;
+                String uriStr = uri.toString();
+                if (!uriStr.contains("boolean_settings")) return;
+                android.database.MatrixCursor fake = new android.database.MatrixCursor(
+                        new String[]{"name", "value"});
+                fake.addRow(new Object[]{"is_in_vr_session", "true"});
+                p.setResult(fake);
+                XposedBridge.log(TAG + ": Hook VrQ: boolean_settings query intercepted → is_in_vr_session=true");
+            }
+        };
+        // 5-arg form: query(Uri, String[], String, String[], String)
+        try {
+            XposedHelpers.findAndHookMethod(android.content.ContentResolver.class, "query",
+                    Uri.class, String[].class, String.class, String[].class, String.class,
+                    interceptor);
+            XposedBridge.log(TAG + ": Hook VrQ(5-arg) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook VrQ(5-arg) FAILED: " + e); }
+        // Bundle-based form: query(Uri, String[], Bundle, CancellationSignal)
+        try {
+            XposedHelpers.findAndHookMethod(android.content.ContentResolver.class, "query",
+                    Uri.class, String[].class, android.os.Bundle.class, android.os.CancellationSignal.class,
+                    interceptor);
+            XposedBridge.log(TAG + ": Hook VrQ(Bundle) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook VrQ(Bundle) FAILED: " + e); }
+    }
+
+    // ── Hook DaydreamApi: force Daydream mode in Photos VR ───────────────────
+    // Google Photos VR calls DaydreamApi.isDaydreamEnabled() to decide whether to
+    // use Daydream rendering or fall back to Cardboard. On Android 16 without
+    // official Daydream support this returns false. Force it to true.
+    private void hookDaydreamApi(ClassLoader cl) {
+        try {
+            Class<?> daydreamApiClass = XposedHelpers.findClass(
+                    "com.google.vr.ndk.base.DaydreamApi", cl);
+            // isDaydreamEnabled(Context) — static check for device Daydream capability
+            try {
+                XposedHelpers.findAndHookMethod(daydreamApiClass, "isDaydreamEnabled",
+                        android.content.Context.class, new XC_MethodHook() {
+                            @Override protected void beforeHookedMethod(MethodHookParam p) {
+                                p.setResult(Boolean.TRUE);
+                                XposedBridge.log(TAG + ": DaydreamApi.isDaydreamEnabled → true");
+                            }
+                        });
+            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamEnabled hook: " + t); }
+            // isDaydreamCurrentViewer() — checks current viewer type
+            try {
+                XposedHelpers.findAndHookMethod(daydreamApiClass, "isDaydreamCurrentViewer",
+                        new XC_MethodHook() {
+                            @Override protected void beforeHookedMethod(MethodHookParam p) {
+                                p.setResult(Boolean.TRUE);
+                                XposedBridge.log(TAG + ": DaydreamApi.isDaydreamCurrentViewer → true");
+                            }
+                        });
+            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamCurrentViewer hook: " + t); }
+            XposedBridge.log(TAG + ": Hook DaydreamApi installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook DaydreamApi FAILED: " + e); }
     }
 
     // ── Hook H: Accept any headset as Daydream-compatible ───────────────────
