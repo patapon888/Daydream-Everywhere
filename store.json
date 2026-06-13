@@ -7,17 +7,20 @@
         {
           "package": "com.google.android.apps.youtube.vr",
           "title": "YouTube VR",
-          "motion": 1
+          "motion": 2,
+          "icon_url": "https://raw.githubusercontent.com/patapon888/Daydream-Everywhere/main/icons/youtube_vr.png"
         },
         {
           "package": "in.fulldive.shell",
           "title": "Fulldive VR",
-          "motion": 2
+          "motion": 2,
+          "icon_url": "https://raw.githubusercontent.com/patapon888/Daydream-Everywhere/main/icons/fulldive.png"
         },
         {
           "package": "com.google.android.apps.photos.daydream",
           "title": "Google Photos VR",
-          "motion": 1
+          "motion": 1,
+          "icon_url": "https://raw.githubusercontent.com/patapon888/Daydream-Everywhere/main/icons/photos_vr.png"
         }
       ]
     }
