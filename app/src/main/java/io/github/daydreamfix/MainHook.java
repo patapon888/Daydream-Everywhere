@@ -59,8 +59,11 @@ public class MainHook implements IXposedHookLoadPackage {
             hookControllerServiceBridge(lpparam.classLoader); // Hook CSB (PKG_DAYDREAM classloader)
             hookStoreRequest(lpparam.classLoader);        // Hook PS: private store
             hookAppTile(lpparam.classLoader);             // Hook Tile: force placeholder icons
+            hookAegBackground(lpparam.classLoader);       // Hook AegBg: fix non-fife background URL
             hookDiscoveryClick(lpparam.classLoader);      // Hook DC: launch apps from discovery
+            hookDiscoveryNetworkCheck(lpparam.classLoader); // Hook DNet: agv.g() always true
             hookVrSessionQuery();                         // Hook VrQ: always return is_in_vr_session=true
+            hookLibraryFakeEntries(lpparam.classLoader);  // Hook Lib: alu.h=true for fake entries
         }
 
         if (lpparam.packageName.equals(PKG_YOUTUBE_VR)) {
@@ -68,14 +71,18 @@ public class MainHook implements IXposedHookLoadPackage {
             hookParcelReadException();
             hookBlastBufferQueue(lpparam.classLoader);
             hookSurfaceViewType(PKG_YOUTUBE_VR);
+            hookYouTubeVrEdgeToEdge();
         }
 
         if (lpparam.packageName.equals(PKG_FIREFOX_REALITY)) {
             XposedBridge.log(TAG + ": Injecting into " + PKG_FIREFOX_REALITY);
             hookParcelReadException();
-            hookBlastBufferQueue(lpparam.classLoader);
-            // hookSurfaceViewType intentionally omitted: Firefox Reality uses GeckoView
-            // SurfaceViews for web content; PUSH_BUFFERS on those causes crash.
+            // hookBlastBufferQueue intentionally omitted: Firefox Reality uses GVR's
+            // single-buffered rendering path; forcing singleBufferMode=false crashes GVR init.
+            // hookSurfaceViewType intentionally omitted: GeckoView SurfaceViews + PUSH_BUFFERS crashes.
+            hookGvrLayout(lpparam.classLoader);
+            hookFirefoxContextWrapper();
+            hookFirefoxVrService();
         }
 
         if (lpparam.packageName.equals(PKG_PHOTOS_VR)) {
@@ -84,6 +91,7 @@ public class MainHook implements IXposedHookLoadPackage {
             hookBlastBufferQueue(lpparam.classLoader);
             // hookSurfaceViewType intentionally omitted: same reason as Firefox Reality.
             hookDaydreamApi(lpparam.classLoader);         // force Daydream mode (not Cardboard fallback)
+            hookVrSessionQuery();                         // Photos VR queries is_in_vr_session in its own process
         }
 
         if (lpparam.packageName.equals(PKG_VRCORE)) {
@@ -746,8 +754,9 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     // ── Hook Tile: force placeholder icons + fix text visibility ────────────
-    // Only applies to our fake store tiles, identified by egr.b starting with "FAKE:".
-    // buildStoreResponse() sets egr.b = "FAKE:" + pkg; real tiles never have this prefix.
+    // Only applies to our fake store tiles, identified by egr.j starting with "FAKE:".
+    // buildStoreResponse() sets egr.j = "FAKE:" + pkg; real tiles never have this field set.
+    // egr.b holds the real GitHub icon URL; egw.a is set from it before bhd.a() runs.
     // Text visibility: tint the info-bg entity dark and the title entity white so text
     // is readable on both the dark VR cave and the white 2D discovery panel.
     private void hookAppTile(ClassLoader cl) {
@@ -794,44 +803,69 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(bhdClass, "a",
                     eguClass, int.class, int.class, int.class,
                     new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
-                            Object tile = p.getResult();
-                            if (tile == null) return;
-                            // Identify fake tiles via FAKE: prefix on egr.b
+                        // BEFORE native bhd.a() runs: ensure egw.a is set to the GitHub icon URL
+                        // so bhd.a()'s image loader (bkhVar.l.a) picks it up via aeg.c() which
+                        // passes non-fife URLs through unchanged. buildStoreResponse already sets
+                        // egw.a, but this is a safety net in case the egw object was replaced.
+                        @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
                             try {
                                 Object eguArg = p.args[0];
                                 Object egrObj = XposedHelpers.getObjectField(eguArg, "b");
                                 if (egrObj == null) return;
-                                String marker = (String) XposedHelpers.getObjectField(egrObj, "b");
+                                String marker = (String) XposedHelpers.getObjectField(egrObj, "j");
+                                if (marker == null || !marker.startsWith("FAKE:")) return;
+                                String pkg = marker.substring(5);
+                                String iconUrl = (String) XposedHelpers.getObjectField(egrObj, "b");
+                                if (iconUrl == null || iconUrl.isEmpty()) return;
+                                Object egwObj = XposedHelpers.getObjectField(egrObj, "q");
+                                if (egwObj != null) {
+                                    XposedHelpers.setObjectField(egwObj, "a", iconUrl); // foreground
+                                    XposedHelpers.setObjectField(egwObj, "b", iconUrl); // background — required by bhd.a()
+                                    XposedBridge.log(TAG + ": Hook Tile: egw.a+b confirmed for " + pkg);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + ": Hook Tile beforeHook error: " + t);
+                            }
+                        }
+
+                        // AFTER native bhd.a() runs: set background placeholder, apply dark bg + white title colors.
+                        @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                            Object tile = p.getResult();
+                            if (tile == null) return;
+                            try {
+                                Object eguArg = p.args[0];
+                                Object egrObj = XposedHelpers.getObjectField(eguArg, "b");
+                                if (egrObj == null) return;
+                                String marker = (String) XposedHelpers.getObjectField(egrObj, "j");
                                 if (marker == null || !marker.startsWith("FAKE:")) return;
                             } catch (Throwable t) { return; }
 
-                            XposedBridge.log(TAG + ": Hook Tile: fake tile detected, applying fix");
                             try {
-                                // Load placeholder textures
-                                XposedHelpers.setObjectField(tile, "n",
-                                        "textures/app_icon_foreground_placeholder.webp");
+                                String tileN = null;
+                                try { tileN = (String) XposedHelpers.getObjectField(tile, "n"); }
+                                catch (Throwable ignored) {}
+                                XposedBridge.log(TAG + ": Hook Tile afterHook: tile.n=" + tileN);
+
+                                // Background: native code skipped tile.o (egw.b not set), apply placeholder
                                 XposedHelpers.setObjectField(tile, "o",
                                         "textures/app_icon_background_placeholder.webp");
+                                // If native code didn't load any foreground (file:// not supported),
+                                // fall back to placeholder so the tile isn't completely blank.
+                                if (tileN == null || tileN.isEmpty()) {
+                                    XposedHelpers.setObjectField(tile, "n",
+                                            "textures/app_icon_foreground_placeholder.webp");
+                                }
                                 tile.getClass().getMethod("d").invoke(tile);
-                                XposedBridge.log(TAG + ": Hook Tile: placeholder textures loaded");
 
                                 Object entity_i = XposedHelpers.getObjectField(tile, "i");
                                 Object entity_j = XposedHelpers.getObjectField(tile, "j");
-                                XposedBridge.log(TAG + ": Hook Tile: entity_i=" + entity_i
-                                        + " entity_j=" + entity_j
-                                        + " colorMethod=" + finalColorMethod);
-
                                 if (finalColorMethod != null && entity_i != null && entity_j != null) {
-                                    // darkBg: semi-transparent dark overlay so title is readable
                                     Object darkBg = mathfuInst != null
                                             ? vec4Ctor.newInstance(mathfuInst, 0.1f, 0.1f, 0.1f, 0.85f)
                                             : vec4Ctor.newInstance(0.1f, 0.1f, 0.1f, 0.85f);
-                                    // white: force title text to white
                                     Object white = mathfuInst != null
                                             ? vec4Ctor.newInstance(mathfuInst, 1.0f, 1.0f, 1.0f, 1.0f)
                                             : vec4Ctor.newInstance(1.0f, 1.0f, 1.0f, 1.0f);
-                                    XposedBridge.log(TAG + ": Hook Tile: darkBg=" + darkBg + " white=" + white);
                                     finalColorMethod.invoke(entity_i, darkBg);
                                     finalColorMethod.invoke(entity_j, white);
                                     XposedBridge.log(TAG + ": Hook Tile: colors applied");
@@ -843,6 +877,31 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + ": Hook Tile installed");
         } catch (Throwable e) { XposedBridge.log(TAG + ": Hook Tile FAILED: " + e); }
+    }
+
+    // ── Hook AegBg: fix non-fife background URL ───────────────────────────────
+    // aeg.b(String, int, RectF) instance method always appends "-fcrop64=1,..." crop params,
+    // even for non-fife URLs (e.g. GitHub). This corrupts the background URL, Glide fails,
+    // alz.d() sets e=true, and alz.c() then refuses to deliver the foreground bitmap either.
+    // Fix: for non-fife URLs, return str unchanged (same as aeg.c() does for foreground).
+    private void hookAegBackground(ClassLoader cl) {
+        try {
+            Class<?> aegClass = XposedHelpers.findClass("aeg", cl);
+            XposedHelpers.findAndHookMethod(aegClass, "b",
+                    String.class, int.class, android.graphics.RectF.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                            String url = (String) p.args[0];
+                            if (url == null) return;
+                            if (url.contains("googleusercontent") || url.contains("ggpht.com")) return;
+                            // Non-fife URL: return unchanged, bypassing the -fcrop64 suffix append.
+                            // store.json provides separate icon_url (foreground) and background_url
+                            // (banner), so foreground and background load different images.
+                            p.setResult(url);
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook AegBg installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook AegBg FAILED: " + e); }
     }
 
     // ── Hook PS: Private store — intercept gRPC call, return JSON-sourced response ─
@@ -868,14 +927,23 @@ public class MainHook implements IXposedHookLoadPackage {
                             // tab (ahd → agv.a() renders the RecyclerView list). Both use amu.a()
                             // with the same dvw response format; all other callbacks pass through.
                             String cbName = p.args[2].getClass().getSimpleName();
-                            if (!"biw".equals(cbName) && !"ahd".equals(cbName)) {
+                            XposedBridge.log(TAG + ": Hook PS: amu.a() cb=" + cbName);
+                            // biw = VR play store, ahd = 2D discovery, bcw = VR library
+                            if (!"biw".equals(cbName) && !"ahd".equals(cbName) && !"bcw".equals(cbName)) {
                                 return;
                             }
                             p.setResult(null); // skip real gRPC call
                             final Object ada = p.args[2];
+                            // ahd (2D discovery) updates RecyclerView → needs main thread.
+                            // biw (VR store) and bcw (VR library) use Lullaby → thread-agnostic.
+                            final boolean isDiscovery = "ahd".equals(cbName);
                             new Thread(() -> {
                                 try {
-                                    Object dvw = buildStoreResponse(cl);
+                                    // bcw (VR library) needs egu.a=3 so bcd.b() hits case 3 → bby
+                                    // controller → non-null bfj tile. biw/ahd must NOT have egu.a set:
+                                    // ahu.b() returns viewType 2 instead of -2 when egu.a is non-null,
+                                    // which breaks the DiscoveryCard layout and makes Apps tiles vanish.
+                                    Object dvw = buildStoreResponse(cl, "bcw".equals(cbName));
                                     Method cb = null;
                                     for (Method m : ada.getClass().getMethods()) {
                                         if (m.getName().equals("a") && m.getParameterCount() == 1
@@ -884,14 +952,44 @@ public class MainHook implements IXposedHookLoadPackage {
                                         }
                                     }
                                     if (cb == null) {
-                                        // ada is an interface — find via declared methods on biw
                                         cb = ada.getClass().getDeclaredMethod("a", Object.class);
                                     }
                                     cb.setAccessible(true);
-                                    cb.invoke(ada, dvw);
-                                    XposedBridge.log(TAG + ": Hook PS: store response delivered");
+                                    final Method finalCb = cb;
+                                    final Object finalDvw = dvw;
+                                    if (isDiscovery) {
+                                        // 2D discovery: agv renders into a RecyclerView, which
+                                        // requires the main thread. Delivering from DaydreamStore
+                                        // thread causes a CalledFromWrongThreadException that is
+                                        // silently swallowed inside the 444-instruction a(dvw,int).
+                                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                            try {
+                                                finalCb.invoke(ada, finalDvw);
+                                                XposedBridge.log(TAG + ": Hook PS: [ahd] discovery delivered on main thread");
+                                            } catch (Throwable t) {
+                                                XposedBridge.log(TAG + ": Hook PS: [ahd] main-thread error: " + t);
+                                            }
+                                        });
+                                    } else {
+                                        // biw/bcw: Lullaby is thread-agnostic but bcw's internal
+                                        // Handler creation requires a Looper — deliver on main thread.
+                                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                            try {
+                                                finalCb.invoke(ada, finalDvw);
+                                                XposedBridge.log(TAG + ": Hook PS: [" + cbName + "] delivered on main thread");
+                                            } catch (Throwable t) {
+                                                XposedBridge.log(TAG + ": Hook PS: [" + cbName + "] main-thread error: " + t);
+                                            }
+                                        });
+                                    }
                                 } catch (Throwable t) {
-                                    XposedBridge.log(TAG + ": Hook PS: error: " + t);
+                                    Throwable root = t;
+                                    while (root.getCause() != null) root = root.getCause();
+                                    XposedBridge.log(TAG + ": Hook PS: error=" + t.getClass().getSimpleName()
+                                            + " root=" + root.getClass().getSimpleName() + ": " + root.getMessage());
+                                    StackTraceElement[] st = root.getStackTrace();
+                                    for (int ii = 0; ii < Math.min(5, st.length); ii++)
+                                        XposedBridge.log(TAG + ":   at " + st[ii]);
                                 }
                             }, "DaydreamStore").start();
                         }
@@ -900,7 +998,7 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable e) { XposedBridge.log(TAG + ": Hook PS FAILED: " + e); }
     }
 
-    private Object buildStoreResponse(ClassLoader cl) throws Exception {
+    private Object buildStoreResponse(ClassLoader cl, boolean forLibrary) throws Exception {
         // Fetch JSON
         HttpURLConnection conn = (HttpURLConnection) new URL(STORE_JSON_URL).openConnection();
         conn.setConnectTimeout(8000);
@@ -917,7 +1015,10 @@ public class MainHook implements IXposedHookLoadPackage {
         Class<?> eguClass = XposedHelpers.findClass("egu", cl);
         Class<?> egrClass = XposedHelpers.findClass("egr", cl);
         Class<?> egwClass = XposedHelpers.findClass("egw", cl);
+        Class<?> egzClass = XposedHelpers.findClass("egz", cl);
+        Class<?> egyClass = XposedHelpers.findClass("egy", cl);
         Class<?> dwaClass = XposedHelpers.findClass("dwa", cl);
+        Class<?> dvzClass = XposedHelpers.findClass("dvz", cl);
         Class<?> dvwClass = XposedHelpers.findClass("dvw", cl);
 
         Object[] egvArr = (Object[]) java.lang.reflect.Array.newInstance(egvClass, collections.length());
@@ -931,22 +1032,57 @@ public class MainHook implements IXposedHookLoadPackage {
                 String pkg = app.getString("package");
                 String title = app.getString("title");
 
-                Object egr = egrClass.newInstance();
-                XposedHelpers.setObjectField(egr, "b", "FAKE:" + pkg);  // marker checked by hookAppTile
-                XposedHelpers.setObjectField(egr, "c", title); // display title (bkhVar.j.b(egr.c))
-                XposedHelpers.setObjectField(egr, "k", pkg);   // package_name for launch event (vr::launcher::SetEntityPackageEvent)
+                // icon_url = foreground icon (512×512 square), background_url = wide banner (1600×900).
+                // egw.a = foreground URL → aeg.c() passes non-fife unchanged → Glide loads it.
+                // egw.b = background URL → aeg.b(url,size,RectF) instance method intercepted by
+                //         hookAegBackground which returns non-fife URLs unchanged (no -fcrop64 suffix).
+                // bhd.a() requires BOTH egw.a AND egw.b non-empty or the entire icon block is skipped.
+                String iconUrl = app.optString("icon_url", null);
+                // background_url defaults to icon_url if not specified
+                String backgroundUrl = app.optString("background_url", iconUrl);
 
-                // egr.q (DaydreamInfo egw) must be non-null for bhw.a(egr) to return true,
-                // which is required for the click handler (bhg) to trigger the launch flow.
-                // egw.d is the motion type Integer (proto number): 1=NO_MOTION, 2=MODERATE, 3=INTENSE.
-                // Default (0) maps to UNKNOWN_MOTION → "Mouvement inconnu" in detail page header.
+                Object egr = egrClass.newInstance();
+                XposedHelpers.setObjectField(egr, "j", "FAKE:" + pkg); // marker for our hooks
+                if (iconUrl != null) {
+                    XposedHelpers.setObjectField(egr, "b", iconUrl);    // icon URL for 2D discovery
+                }
+                XposedHelpers.setObjectField(egr, "c", title); // display title (bkhVar.j.b(egr.c))
+                XposedHelpers.setObjectField(egr, "k", pkg);   // package_name for launch
+
+                // egr.q (DaydreamInfo egw) must be non-null for bhw.a(egr) to return true.
+                // egw.a = foreground icon URL, egw.b = background banner URL.
+                // egw.d = motion type Integer: 1=NO_MOTION, 2=MODERATE, 3=INTENSE.
                 int motionType = app.optInt("motion", 2);
                 Object egw = egwClass.newInstance();
                 XposedHelpers.setObjectField(egw, "d", Integer.valueOf(motionType));
+                if (iconUrl != null) {
+                    XposedHelpers.setObjectField(egw, "a", iconUrl);       // foreground icon
+                    XposedHelpers.setObjectField(egw, "b", backgroundUrl); // background banner
+                }
                 XposedHelpers.setObjectField(egr, "q", egw);
+
+                if (iconUrl != null) {
+                    XposedBridge.log(TAG + ": Hook PS: icon URL set for " + pkg + " → " + iconUrl);
+                }
 
                 Object egu = eguClass.newInstance();
                 XposedHelpers.setObjectField(egu, "b", egr);
+                // egu.a = content type Integer (APP_CONTENT_TYPE = 3) — only for VR library (bcw).
+                // Must NOT be set for 2D discovery (ahd/biw): breaks DiscoveryCard layout.
+                if (forLibrary) {
+                    XposedHelpers.setObjectField(egu, "a", Integer.valueOf(3));
+                }
+                // egu.c = egz (content metadata). Both DiscoveryCard and DiscoverySlide check egu.c != null.
+                Object egz = egzClass.newInstance();
+                if (iconUrl != null) {
+                    Object egyItem = egyClass.newInstance();
+                    XposedHelpers.setObjectField(egyItem, "a", iconUrl);
+                    XposedHelpers.setObjectField(egyItem, "d", Integer.valueOf(4)); // PREVIEW
+                    Object egyArr = java.lang.reflect.Array.newInstance(egyClass, 1);
+                    java.lang.reflect.Array.set(egyArr, 0, egyItem);
+                    XposedHelpers.setObjectField(egz, "d", egyArr);
+                }
+                XposedHelpers.setObjectField(egu, "c", egz);
                 eguArr[j] = egu;
             }
 
@@ -957,43 +1093,125 @@ public class MainHook implements IXposedHookLoadPackage {
             egvArr[i] = egv;
         }
 
+        // dvw.e (dwa): used by biw (VR play store) and ahd (2D discovery)
         Object dwa = dwaClass.newInstance();
         XposedHelpers.setObjectField(dwa, "a", egvArr);
 
+        // dvw.c (dvz): used by bcw (VR library). dvz.a is egv[], dvz.a() returns OK by default.
+        Object dvz = dvzClass.newInstance();
+        XposedHelpers.setObjectField(dvz, "a", egvArr);
+
         Object dvw = dvwClass.newInstance();
         XposedHelpers.setObjectField(dvw, "e", dwa);
+        XposedHelpers.setObjectField(dvw, "c", dvz);
         return dvw;
+    }
+
+    // ── Hook DNet: agv.g() network check always returns true ────────────────
+    // agv.g() calls ConnectivityManager.getActiveNetworkInfo() which returns null
+    // right after process startup on Android 16 (deprecated API, not yet initialized).
+    // When null, agv.a(false) calls f() (offline/TRY AGAIN view) instead of amu.a().
+    // After orientation change the fragment is retained but onResume fires again;
+    // by then getActiveNetworkInfo() has initialized → content loads. Fix: always
+    // return true — we bypass the real server anyway via hookStoreRequest.
+    private void hookDiscoveryNetworkCheck(ClassLoader cl) {
+        try {
+            Class<?> agvClass = XposedHelpers.findClass("agv", cl);
+            XposedHelpers.findAndHookMethod(agvClass, "g", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    p.setResult(Boolean.TRUE);
+                }
+            });
+            XposedBridge.log(TAG + ": Hook DNet (agv.g) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook DNet FAILED: " + e); }
+    }
+
+    // ── Hook Lib: force alu.h=true for fake store entries ───────────────────
+    // bcm.a(egu, aqe) returns null when (!aluVarA.c() || aluVarA.h) is false.
+    // alu.h = afp.a(pkg, null, null) != null — afp tries the Play Store catalog
+    // which is dead, so h=false for all our fake entries. With h=false and c()=true
+    // (app treated as "purchasable"), both conditions fail and bcm is null → the
+    // VR library collection stays empty → shows error state ("HAUT DE PAGE").
+    // Fix: after alu.a(egu,...) runs, if the egu is one of our FAKE: entries,
+    // force h=true so the bcm is included and the library renders the tile.
+    private void hookLibraryFakeEntries(ClassLoader cl) {
+        try {
+            Class<?> aluClass = XposedHelpers.findClass("alu", cl);
+            XposedBridge.hookAllMethods(aluClass, "a", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                    Object result = p.getResult();
+                    if (result == null || p.args.length < 1 || p.args[0] == null) return;
+                    try {
+                        // alu.a(egu, context, afb, afp) has egu as first arg
+                        Object egrObj = XposedHelpers.getObjectField(p.args[0], "b");
+                        if (egrObj == null) return;
+                        String marker = (String) XposedHelpers.getObjectField(egrObj, "j");
+                        if (marker == null || !marker.startsWith("FAKE:")) return;
+                        XposedHelpers.setBooleanField(result, "h", true);
+                        XposedBridge.log(TAG + ": Hook Lib: alu.h=true for " + marker);
+                    } catch (Throwable ignored) {}
+                }
+            });
+            XposedBridge.log(TAG + ": Hook Lib (alu.h patch) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook Lib FAILED: " + e); }
     }
 
     // ── Hook DC: Discovery click — launch app by package name ───────────────
     // agv.onEvent(aiz) handles RecyclerView item clicks in the 2D discovery tab.
-    // For type 1 (OPEN_APP) it calls als.a(activity, pkg, playUrl, "browse") which
-    // tries the Play Store if available. For type 2 (OPEN_STORE) it calls the static
-    // als.a(activity, pkg, playUrl) which opens playUrl — both are null for our fake
-    // entries, so nothing happens. Fix: intercept and launch by PackageManager directly.
+    // aiz.a type comes from alt enum ordinal: INSTALL_APP(0)→1, UPDATE_APP(1)→2, OPEN_APP(2)→3.
+    // For installed apps with dead afp, alu.a() hits the z6 branch → i=OPEN_APP → type=3.
+    // als.b() for type=3 calls afp.b(pkg,null,null) → DaydreamApi launch → fails without
+    // VrManager → fallback Play Store URL is null → nothing. For type=1, als.a() opens
+    // market://details?id=pkg (Play Store is present on device, so something happens visually).
+    // Fix: intercept types 1/2/3 and launch by PackageManager directly for all.
+    // NOTE: JADX puts these in "defpackage.*" but the actual dex has no package prefix
+    // (same as amu, dvq, ada, bhd, egu etc.). Use bare class names.
     private void hookDiscoveryClick(ClassLoader cl) {
         try {
-            Class<?> agvClass = XposedHelpers.findClass("defpackage.agv", cl);
-            Class<?> aizClass = XposedHelpers.findClass("defpackage.aiz", cl);
+            Class<?> agvClass = XposedHelpers.findClass("agv", cl);
+            Class<?> aizClass = XposedHelpers.findClass("aiz", cl);
             XposedHelpers.findAndHookMethod(agvClass, "onEvent", aizClass, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
                     Object aiz = p.args[0];
                     int type = XposedHelpers.getIntField(aiz, "a");
-                    if (type != 1 && type != 2) return; // only OPEN_APP and OPEN_STORE
-                    String pkg = (String) XposedHelpers.getObjectField(aiz, "c");
+                    String rawPkg = (String) XposedHelpers.getObjectField(aiz, "c");
+                    String rawD   = null;
+                    try { rawD = (String) XposedHelpers.getObjectField(aiz, "d"); } catch (Throwable ignored) {}
+                    XposedBridge.log(TAG + ": Hook DC: onEvent type=" + type
+                            + " c='" + rawPkg + "' d='" + rawD + "'");
+                    // Type 1=INSTALL_APP, 2=UPDATE_APP, 3=OPEN_APP — all have pkg in aiz.c
+                    if (type != 1 && type != 2 && type != 3) return;
+                    String pkg = rawPkg;
                     if (pkg == null || pkg.isEmpty()) return;
+                    // Strip FAKE: marker if our buildStoreResponse put it in egr.b instead of egr.k
+                    if (pkg.startsWith("FAKE:")) pkg = pkg.substring(5);
                     try {
                         // agv.h is the Activity reference (public Activity h)
                         Activity activity = (Activity) XposedHelpers.getObjectField(p.thisObject, "h");
                         if (activity == null) return;
                         android.content.pm.PackageManager pm = activity.getPackageManager();
-                        android.content.Intent launchIntent = pm.getLaunchIntentForPackage(pkg);
-                        if (launchIntent != null) {
-                            activity.startActivity(launchIntent);
+                        // Try Daydream VR intent first — apps like Photos VR register a
+                        // separate activity with DAYDREAM category distinct from the LAUNCHER.
+                        // getLaunchIntentForPackage would hit the non-VR launcher activity.
+                        android.content.Intent vrIntent = new android.content.Intent("android.intent.action.MAIN");
+                        vrIntent.addCategory("com.google.intent.category.DAYDREAM");
+                        vrIntent.setPackage(pkg);
+                        android.content.pm.ResolveInfo ri = pm.resolveActivity(vrIntent, 0);
+                        if (ri != null) {
+                            vrIntent.setComponent(new android.content.ComponentName(
+                                    ri.activityInfo.packageName, ri.activityInfo.name));
+                            activity.startActivity(vrIntent);
                             p.setResult(null);
-                            XposedBridge.log(TAG + ": Hook DC: launched " + pkg);
+                            XposedBridge.log(TAG + ": Hook DC: launched " + pkg + " via DAYDREAM category");
                         } else {
-                            XposedBridge.log(TAG + ": Hook DC: no launch intent for " + pkg);
+                            android.content.Intent launchIntent = pm.getLaunchIntentForPackage(pkg);
+                            if (launchIntent != null) {
+                                activity.startActivity(launchIntent);
+                                p.setResult(null);
+                                XposedBridge.log(TAG + ": Hook DC: launched " + pkg + " via default intent");
+                            } else {
+                                XposedBridge.log(TAG + ": Hook DC: no intent for " + pkg);
+                            }
                         }
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + ": Hook DC error: " + t);
@@ -1039,36 +1257,242 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable e) { XposedBridge.log(TAG + ": Hook VrQ(Bundle) FAILED: " + e); }
     }
 
+    // ── Hook YT: YouTube VR edge-to-edge (hide system bars + disable cutout) ──
+    // YouTube VR renders stereo at the wrong eye separation because the Pixel 8
+    // display cutout (camera hole, 132px) adds a left-edge inset. Two fixes needed:
+    // 1. LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES: render into the cutout area.
+    // 2. WindowInsetsController.hide(systemBars()): removes nav/status bars.
+    // Applied on every onWindowFocusChanged(true) to survive Activity transitions.
+    private void hookYouTubeVrEdgeToEdge() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onWindowFocusChanged",
+                    boolean.class, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                            if (!(boolean) p.args[0]) return;
+                            Activity a = (Activity) p.thisObject;
+                            try {
+                                android.view.Window win = a.getWindow();
+                                // Extend layout into the display cutout region
+                                android.view.WindowManager.LayoutParams lp = win.getAttributes();
+                                lp.layoutInDisplayCutoutMode =
+                                        android.view.WindowManager.LayoutParams
+                                                .LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                                win.setAttributes(lp);
+                                // Hide all system bars (status + navigation)
+                                android.view.WindowInsetsController wic = win.getInsetsController();
+                                if (wic != null) {
+                                    wic.hide(android.view.WindowInsets.Type.systemBars());
+                                    wic.setSystemBarsBehavior(
+                                            android.view.WindowInsetsController
+                                                    .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                                }
+                                XposedBridge.log(TAG + ": Hook YT: edge-to-edge + cutout applied");
+                            } catch (Throwable t) { XposedBridge.log(TAG + ": Hook YT error: " + t); }
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook YT (edge-to-edge) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook YT FAILED: " + e); }
+    }
+
+    // ── Hook FFX: Android 16 ContextWrapper.getDisplayId() NPE in Firefox Reality ─
+    // Android 16 added context.getDisplayId() inside ViewConfiguration.<init>(), called
+    // on every View construction. VR SDK (GVR/Gecko) creates ContextWrapper instances
+    // with a null mBase as part of VR surface setup. On Android < 16 this was never
+    // called; now it NPEs immediately. Fix: return default display (0) when mBase=null.
+    private void hookFirefoxContextWrapper() {
+        try {
+            XposedHelpers.findAndHookMethod(android.content.ContextWrapper.class, "getDisplayId",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                            try {
+                                java.lang.reflect.Field f =
+                                        android.content.ContextWrapper.class.getDeclaredField("mBase");
+                                f.setAccessible(true);
+                                if (f.get(p.thisObject) == null) {
+                                    p.setResult(0);
+                                    XposedBridge.log(TAG + ": Hook FFX: getDisplayId null mBase → 0");
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook FFX (ContextWrapper.getDisplayId) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook FFX FAILED: " + e); }
+    }
+
+    // ── Hook GVR: catch GvrLayout init failure in Firefox Reality ───────────
+    // Firefox Reality calls GvrLayout.createGvrLayout(Activity) on startup.
+    // On Android 16 without VrManager, GVR initialization fails and may throw
+    // or call exit(). Wrapping in afterHook clears the exception so Firefox can
+    // degrade gracefully instead of crashing.
+    private void hookGvrLayout(ClassLoader cl) {
+        try {
+            Class<?> gvrLayout = XposedHelpers.findClass("com.google.vr.sdk.base.GvrLayout", cl);
+            XposedHelpers.findAndHookMethod(gvrLayout, "createGvrLayout",
+                    android.content.Context.class, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                            if (p.hasThrowable()) {
+                                XposedBridge.log(TAG + ": Hook GVR: GvrLayout.createGvrLayout threw: "
+                                        + p.getThrowable() + " — suppressing");
+                                p.setThrowable(null);
+                                p.setResult(null);
+                            } else {
+                                XposedBridge.log(TAG + ": Hook GVR: GvrLayout.createGvrLayout → "
+                                        + p.getResult());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hook GVR (Firefox GvrLayout) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook GVR (Firefox GvrLayout) FAILED: " + e); }
+    }
+
+    // ── Hook Firefox Reality VRService: fake HTC VR service connection ──────
+    // Firefox Reality (VRBrowser) was built for HTC Vive Focus and tries to bind
+    // com.htc.vr.core.server.VRService on startup. That service doesn't exist on
+    // a Pixel 8, causing VRActivityDecorator to call finish() then System.exit(0).
+    // Fix: intercept bindService for the HTC and Google VR service packages,
+    // return true (binding "in progress"), then deliver onServiceConnected with a
+    // stub Binder on the main thread. Also suppress System.exit as a safety net.
+    private void hookFirefoxVrService() {
+        // Fake the VRService binding so VRActivityDecorator doesn't call finish().
+        try {
+            XposedHelpers.findAndHookMethod(android.content.ContextWrapper.class, "bindService",
+                android.content.Intent.class,
+                android.content.ServiceConnection.class,
+                int.class,
+                new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                        android.content.Intent intent = (android.content.Intent) p.args[0];
+                        if (intent == null) return;
+                        android.content.ComponentName comp = intent.getComponent();
+                        String pkg = comp != null ? comp.getPackageName() : intent.getPackage();
+                        if (pkg == null) return;
+                        if (!pkg.contains("htc.vr") && !pkg.contains("google.vr.vrcore")) return;
+
+                        final android.content.ServiceConnection conn =
+                            (android.content.ServiceConnection) p.args[1];
+                        final android.content.ComponentName name = comp != null ? comp
+                            : new android.content.ComponentName(pkg, pkg + ".VRService");
+                        XposedBridge.log(TAG + ": Hook FFX: intercepting bindService for " + pkg);
+
+                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                            try {
+                                android.os.Binder stub = new android.os.Binder();
+                                conn.onServiceConnected(name, stub);
+                                XposedBridge.log(TAG + ": Hook FFX: faked onServiceConnected for " + name.flattenToShortString());
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + ": Hook FFX: faked onServiceConnected error: " + t);
+                            }
+                        }, 200);
+                        p.setResult(Boolean.TRUE);
+                    }
+                });
+            XposedBridge.log(TAG + ": Hook FFX (bindService) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook FFX bindService FAILED: " + e); }
+
+        // Safety net: suppress System.exit() so a VR init failure doesn't kill the process.
+        try {
+            XposedHelpers.findAndHookMethod(java.lang.System.class, "exit", int.class,
+                new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                        int code = (int) p.args[0];
+                        XposedBridge.log(TAG + ": Hook FFX: suppressed System.exit(" + code + ")");
+                        p.setResult(null);
+                    }
+                });
+            XposedBridge.log(TAG + ": Hook FFX (System.exit) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook FFX System.exit FAILED: " + e); }
+    }
+
     // ── Hook DaydreamApi: force Daydream mode in Photos VR ───────────────────
-    // Google Photos VR calls DaydreamApi.isDaydreamEnabled() to decide whether to
-    // use Daydream rendering or fall back to Cardboard. On Android 16 without
-    // official Daydream support this returns false. Force it to true.
+    // Google Photos VR uses several gateways to decide Daydream vs Cardboard mode.
+    // All must return true/non-null on Android 16 without native VrManager support.
     private void hookDaydreamApi(ClassLoader cl) {
+        // DaydreamApi itself
         try {
             Class<?> daydreamApiClass = XposedHelpers.findClass(
                     "com.google.vr.ndk.base.DaydreamApi", cl);
+
+            XC_MethodHook trueHook = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    p.setResult(Boolean.TRUE);
+                    XposedBridge.log(TAG + ": DaydreamApi." + p.method.getName() + " → true");
+                }
+            };
+
             // isDaydreamEnabled(Context) — static check for device Daydream capability
             try {
                 XposedHelpers.findAndHookMethod(daydreamApiClass, "isDaydreamEnabled",
-                        android.content.Context.class, new XC_MethodHook() {
-                            @Override protected void beforeHookedMethod(MethodHookParam p) {
-                                p.setResult(Boolean.TRUE);
-                                XposedBridge.log(TAG + ": DaydreamApi.isDaydreamEnabled → true");
-                            }
-                        });
-            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamEnabled hook: " + t); }
+                        android.content.Context.class, trueHook);
+            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamEnabled: " + t); }
+
             // isDaydreamCurrentViewer() — checks current viewer type
             try {
-                XposedHelpers.findAndHookMethod(daydreamApiClass, "isDaydreamCurrentViewer",
-                        new XC_MethodHook() {
-                            @Override protected void beforeHookedMethod(MethodHookParam p) {
-                                p.setResult(Boolean.TRUE);
-                                XposedBridge.log(TAG + ": DaydreamApi.isDaydreamCurrentViewer → true");
+                XposedHelpers.findAndHookMethod(daydreamApiClass, "isDaydreamCurrentViewer", trueHook);
+            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamCurrentViewer: " + t); }
+
+            // create(Activity) — returns null when VrManager absent; null causes Cardboard fallback.
+            // Fix: if create() returns null, bypass VrManager by calling the private constructor
+            // directly via reflection. DaydreamApi instances created this way have no live service
+            // connection but are non-null, which is enough for Photos VR's mode-selection check.
+            try {
+                XposedHelpers.findAndHookMethod(daydreamApiClass, "create",
+                        android.app.Activity.class, new XC_MethodHook() {
+                            @Override protected void afterHookedMethod(MethodHookParam p) {
+                                if (p.getResult() != null) {
+                                    XposedBridge.log(TAG + ": DaydreamApi.create → non-null (real)");
+                                    return;
+                                }
+                                if (p.hasThrowable()) {
+                                    p.setThrowable(null);
+                                }
+                                // Try every declared constructor — log them all first, then use best fit.
+                                android.app.Activity activity = (android.app.Activity) p.args[0];
+                                java.lang.reflect.Constructor<?>[] ctors =
+                                        daydreamApiClass.getDeclaredConstructors();
+                                for (java.lang.reflect.Constructor<?> ctor : ctors) {
+                                    ctor.setAccessible(true);
+                                    Class<?>[] types = ctor.getParameterTypes();
+                                    try {
+                                        Object instance;
+                                        if (types.length == 0) {
+                                            instance = ctor.newInstance();
+                                        } else if (types.length == 1 && types[0].isAssignableFrom(android.app.Activity.class)) {
+                                            instance = ctor.newInstance(activity);
+                                        } else if (types.length == 1 && types[0].isAssignableFrom(android.content.Context.class)) {
+                                            instance = ctor.newInstance((android.content.Context) activity);
+                                        } else {
+                                            continue;
+                                        }
+                                        p.setResult(instance);
+                                        XposedBridge.log(TAG + ": DaydreamApi.create → forced non-null via " + ctor);
+                                        return;
+                                    } catch (Throwable t) {
+                                        XposedBridge.log(TAG + ": DaydreamApi.create ctor " + ctor + " failed: " + t);
+                                    }
+                                }
+                                XposedBridge.log(TAG + ": DaydreamApi.create → still null (no usable ctor found)");
                             }
                         });
-            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.isDaydreamCurrentViewer hook: " + t); }
+            } catch (Throwable t) { XposedBridge.log(TAG + ": DaydreamApi.create: " + t); }
+
             XposedBridge.log(TAG + ": Hook DaydreamApi installed");
         } catch (Throwable e) { XposedBridge.log(TAG + ": Hook DaydreamApi FAILED: " + e); }
+
+        // DaydreamUtils.isDaydreamViewer(DeviceParams) — same check as vrcore Hook H,
+        // but Photos VR has its own GVR SDK copy in its own classloader.
+        try {
+            Class<?> daydreamUtils = XposedHelpers.findClass(
+                    "com.google.vr.ndk.base.DaydreamUtils", cl);
+            XposedBridge.hookAllMethods(daydreamUtils, "isDaydreamViewer", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (p.args.length > 0 && p.args[0] != null) {
+                        p.setResult(Boolean.TRUE);
+                        XposedBridge.log(TAG + ": DaydreamUtils.isDaydreamViewer → true (Photos)");
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hook DaydreamUtils (Photos) installed");
+        } catch (Throwable e) { XposedBridge.log(TAG + ": Hook DaydreamUtils (Photos) FAILED: " + e); }
     }
 
     // ── Hook H: Accept any headset as Daydream-compatible ───────────────────
