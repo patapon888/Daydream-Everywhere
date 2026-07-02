@@ -13,7 +13,7 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 
 ## What doesn't work
 
-- Server sided stuff
+- Server sided stuff (WIP)
 
 ## Requirements
 
@@ -23,11 +23,13 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 - A controller: Daydream View remote, or a second phone running the [controller emulator](https://github.com/googlevr/gvr-android-sdk/blob/master/apks/controller_emulator.apk?raw=true)  (you may need to use "Install With Options" as this app has a low target SDK)
 - This module that spoofs the Daydream compatibility https://xdaforums.com/attachments/daydreamvr-zip.4875409/
 - These APK: [Daydream](https://www.apkmirror.com/apk/google-inc/daydream-daydream/daydream-daydream-1-23-190812026-release/daydream-1-23-190812026-android-apk-download/), [Vr Services](https://www.apkmirror.com/apk/google-inc/google-vr-services/google-vr-services-1-23-265693388-release/google-vr-services-1-23-265693388-2-android-apk-download/) and [Daydream keyboard](https://www.apkmirror.com/apk/google-inc/daydream-keyboard-daydream/daydream-keyboard-daydream-1-23-190812016-release/daydream-keyboard-1-23-190812016-android-apk-download/)
+- Optional:
+[YouTube VR](https://www.apkmirror.com/apk/google-inc/youtube-vr-daydream/youtube-vr-daydream-1-28-63-release/youtube-vr-daydream-1-28-63-android-apk-download/)
 
 ---
 
 ## Disclaimer
-- This revival project uses vibe coded parts by Claude Ai
+- This revival project uses vibe coded parts by Claude Ai, however, they have been tested by a human.
 - Note that i have tested it on my own device.
 
 ## Installation
@@ -43,12 +45,22 @@ Google Daydream was officially discontinued, but with a few patches it still wor
 
 ### 2. Native binary patches (Magisk module)
 
-- The patched `.so` files fix rendering and controller compatibility at the native layer.
-- Download the .zip from the [latest release](../../releases/latest) and install it in Magisk or Kerenl SU
+Download the zip from the [latest release](../../releases/latest) and install it in Magisk or Kerenl SU
+
+### 3. Connecting a remote
+
+Daydream View Remote: 
+
+Pair the remote first in the Android Bluetooth settings, then in the Daydream app, do it again if it needs to update (you should not see a pairing popup in the daydream app if done correctly).
+
+Controller emulator:
+
+Pair your second phone in the Bluetooth settings, then enable the developer settings in Daydream, then choose your second phone in the "Controller emulator device" setting.
 
 ---
 
 ## What was broken and how it's fixed
+
 
 ### Rendering flicker
 Android updates changed how shared memory is allocated. The `ashmem` calls in `libvrcore_native.so` were patched to use anonymous `mmap` instead.
